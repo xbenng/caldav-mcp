@@ -296,6 +296,7 @@ class CalDAVClient:
         username: str = "",
         password: str = "",
         auth_type: str = "basic",
+        use_direct_url: bool = False,
     ):
         """
         Initialize CalDAV client.
@@ -305,13 +306,19 @@ class CalDAVClient:
             username: Username for authentication (basic auth)
             password: Password, app password, or OAuth access token
             auth_type: "basic" for username/password, "bearer" for OAuth token
+            use_direct_url: If True, open the URL as a calendar directly instead of
+                discovering calendars via principal. Used for delegated/shared access
+                where the calendar URL is known but principal lookup would only return
+                the authenticating user's own calendars.
         """
         self.url = url
         self.username = username
         self.password = password
         self.auth_type = auth_type
+        self.use_direct_url = use_direct_url
         self.client: Any | None = None
         self.principal: Any | None = None
+        self._direct_calendar: Any | None = None
         # Detect Yandex Calendar for special handling
         self.is_yandex = "yandex.ru" in url.lower() or "yandex.com" in url.lower()
 
@@ -331,22 +338,45 @@ class CalDAVClient:
                     username=self.username,
                     password=self.password,
                 )
-            self.principal = self.client.principal()
+
+            if self.use_direct_url:
+                self._direct_calendar = self.client.calendar(url=self.url)
+            else:
+                self.principal = self.client.principal()
             return True
         except Exception as e:
             raise ConnectionError(f"Failed to connect to CalDAV server: {e}") from e
 
+    def _check_connected(self) -> None:
+        """Raise if not connected."""
+        if self.use_direct_url:
+            if not self._direct_calendar:
+                raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        else:
+            if not self.principal:
+                raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+
+    def _get_calendars(self) -> list[Any]:
+        """Return the list of accessible calendars."""
+        self._check_connected()
+        if self.use_direct_url:
+            return [self._direct_calendar]
+        return self.principal.calendars()  # type: ignore[union-attr]
+
     def list_calendars(self) -> list[CalendarInfo]:
         """Get list of available calendars."""
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         try:
-            calendars = self.principal.calendars()
-            return [
-                CalendarInfo(index=i, name=cal.name, url=str(cal.url))
-                for i, cal in enumerate(calendars)
-            ]
+            calendars = self._get_calendars()
+            result = []
+            for i, cal in enumerate(calendars):
+                try:
+                    name = cal.name or str(cal.url)
+                except Exception:
+                    name = str(cal.url)
+                result.append(CalendarInfo(index=i, name=name, url=str(cal.url)))
+            return result
         except Exception as e:
             raise RuntimeError(f"Failed to list calendars: {e}") from e
 
@@ -396,11 +426,10 @@ class CalDAVClient:
         Returns:
             Event creation metadata
         """
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         try:
-            calendars = self.principal.calendars()
+            calendars = self._get_calendars()
             if calendar_index >= len(calendars):
                 raise ValueError(
                     f"Calendar index {calendar_index} not found. "
@@ -527,11 +556,10 @@ END:VCALENDAR"""
         Returns:
             List of event dictionaries
         """
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         try:
-            calendars = self.principal.calendars()
+            calendars = self._get_calendars()
             if calendar_index >= len(calendars):
                 raise ValueError(
                     f"Calendar index {calendar_index} not found. "
@@ -673,11 +701,10 @@ END:VCALENDAR"""
         Returns:
             Event dictionary or None if not found
         """
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         try:
-            calendars = self.principal.calendars()
+            calendars = self._get_calendars()
             if calendar_index >= len(calendars):
                 raise ValueError(
                     f"Calendar index {calendar_index} not found. "
@@ -777,11 +804,10 @@ END:VCALENDAR"""
         Returns:
             Dictionary with deletion result
         """
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         try:
-            calendars = self.principal.calendars()
+            calendars = self._get_calendars()
             if calendar_index >= len(calendars):
                 raise ValueError(
                     f"Calendar index {calendar_index} not found. "
@@ -836,8 +862,7 @@ END:VCALENDAR"""
         Returns:
             List of matching event dictionaries
         """
-        if not self.principal:
-            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        self._check_connected()
 
         if start_date is None or end_date is None:
             raise ValueError(

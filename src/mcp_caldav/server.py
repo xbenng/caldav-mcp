@@ -66,9 +66,26 @@ def _load_accounts_config() -> list[dict[str, Any]]:
     return [account]
 
 
-def _create_client(account: dict[str, Any]) -> CalDAVClient:
-    """Create a CalDAVClient from an account config dict."""
-    url = account["url"]
+def _google_caldav_url(email: str) -> str:
+    """Build the Google CalDAV URL for a given email address."""
+    return f"https://apidata.googleusercontent.com/caldav/v2/{email}/events/"
+
+
+def _create_client(
+    account: dict[str, Any],
+    url_override: str | None = None,
+    use_direct_url: bool = False,
+) -> CalDAVClient:
+    """Create a CalDAVClient from an account config dict.
+
+    Args:
+        account: Account config dictionary.
+        url_override: Use this URL instead of account["url"]. Used for delegated access.
+        use_direct_url: Open the URL as a calendar directly, skipping principal discovery.
+            Required for delegated/shared calendars where the delegatee's principal would
+            only return their own calendars.
+    """
+    url = url_override or account["url"]
     auth_type = account.get("auth_type", "basic")
     name = account.get("name", "default")
 
@@ -87,11 +104,15 @@ def _create_client(account: dict[str, Any]) -> CalDAVClient:
             client_secrets_file=account.get("google_client_secrets_file"),
             token_path=token_path,
         )
-        return CalDAVClient(url=url, password=access_token, auth_type="bearer")
+        return CalDAVClient(
+            url=url, password=access_token, auth_type="bearer", use_direct_url=use_direct_url
+        )
     else:
         username = account.get("username", "")
         password = account.get("password", "")
-        return CalDAVClient(url=url, username=username, password=password)
+        return CalDAVClient(
+            url=url, username=username, password=password, use_direct_url=use_direct_url
+        )
 
 
 @asynccontextmanager
@@ -109,6 +130,32 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:  # noqa:
             logger.info(f"Connected account '{name}': {account['url']}")
         except Exception as e:
             logger.error(f"Failed to connect account '{name}': {e}")
+            continue
+
+        # Load delegated accounts that share this account's credentials.
+        # Each entry specifies a calendar that the authenticated user has been granted
+        # access to (e.g. via Google Calendar sharing or Workspace delegation).
+        for delegated in account.get("delegated_accounts", []):
+            del_name = delegated.get("name")
+            del_email = delegated.get("email")
+            del_url = delegated.get("url") or (
+                _google_caldav_url(del_email) if del_email else None
+            )
+
+            if not del_name or not del_url:
+                logger.warning(
+                    f"Skipping delegated account under '{name}': "
+                    "must have 'name' and either 'email' or 'url'"
+                )
+                continue
+
+            try:
+                del_client = _create_client(account, url_override=del_url, use_direct_url=True)
+                del_client.connect()
+                clients[del_name] = del_client
+                logger.info(f"Connected delegated account '{del_name}': {del_url}")
+            except Exception as e:
+                logger.error(f"Failed to connect delegated account '{del_name}': {e}")
 
     if not clients and not accounts:
         logger.warning(
