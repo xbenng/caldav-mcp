@@ -293,20 +293,23 @@ class CalDAVClient:
     def __init__(
         self,
         url: str,
-        username: str,
-        password: str,
+        username: str = "",
+        password: str = "",
+        auth_type: str = "basic",
     ):
         """
         Initialize CalDAV client.
 
         Args:
             url: CalDAV server URL (e.g., "https://caldav.example.com/")
-            username: Username for authentication
-            password: Password or app password for authentication
+            username: Username for authentication (basic auth)
+            password: Password, app password, or OAuth access token
+            auth_type: "basic" for username/password, "bearer" for OAuth token
         """
         self.url = url
         self.username = username
         self.password = password
+        self.auth_type = auth_type
         self.client: Any | None = None
         self.principal: Any | None = None
         # Detect Yandex Calendar for special handling
@@ -315,11 +318,19 @@ class CalDAVClient:
     def connect(self) -> bool:
         """Connect to CalDAV server."""
         try:
-            self.client = caldav.DAVClient(
-                url=self.url,
-                username=self.username,
-                password=self.password,
-            )
+            if self.auth_type == "bearer":
+                from caldav.requests import HTTPBearerAuth
+
+                self.client = caldav.DAVClient(
+                    url=self.url,
+                    auth=HTTPBearerAuth(self.password),
+                )
+            else:
+                self.client = caldav.DAVClient(
+                    url=self.url,
+                    username=self.username,
+                    password=self.password,
+                )
             self.principal = self.client.principal()
             return True
         except Exception as e:

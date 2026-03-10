@@ -5,8 +5,9 @@ import logging
 import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from mcp.server import Server
@@ -17,59 +18,107 @@ from .client import CalDAVClient
 # Configure logging
 logger = logging.getLogger("mcp-caldav")
 
+DEFAULT_ACCOUNTS_PATH = os.path.join(
+    os.path.expanduser("~"), ".config", "mcp-caldav", "accounts.json"
+)
+
 
 @dataclass
 class AppContext:
     """Application context for MCP CalDAV."""
 
-    client: CalDAVClient | None = None
+    clients: dict[str, CalDAVClient] = field(default_factory=dict)
 
 
-def get_caldav_config() -> dict[str, str | None]:
-    """Get CalDAV configuration from environment variables."""
-    return {
-        "url": os.getenv("CALDAV_URL"),  # No default - must be configured
-        "username": os.getenv("CALDAV_USERNAME")
-        or os.getenv("YANDEX_USERNAME"),  # Backward compatibility
-        "password": os.getenv("CALDAV_PASSWORD")
-        or os.getenv("YANDEX_PASSWORD"),  # Backward compatibility
+def _load_accounts_config() -> list[dict[str, Any]]:
+    """Load account configs from accounts.json, falling back to env vars."""
+    config_path = os.getenv("CALDAV_ACCOUNTS_CONFIG", DEFAULT_ACCOUNTS_PATH)
+
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            data = json.load(f)
+        accounts = data.get("accounts", [])
+        if accounts:
+            return accounts
+
+    # Fallback: single account from env vars
+    url = os.getenv("CALDAV_URL")
+    if not url:
+        return []
+
+    account: dict[str, Any] = {
+        "name": "default",
+        "url": url,
+        "auth_type": os.getenv("CALDAV_AUTH_TYPE", "basic"),
     }
+    if account["auth_type"] == "basic":
+        account["username"] = os.getenv("CALDAV_USERNAME") or os.getenv("YANDEX_USERNAME") or ""
+        account["password"] = os.getenv("CALDAV_PASSWORD") or os.getenv("YANDEX_PASSWORD") or ""
+    if os.getenv("GOOGLE_CLIENT_ID"):
+        account["google_client_id"] = os.getenv("GOOGLE_CLIENT_ID")
+    if os.getenv("GOOGLE_CLIENT_SECRET"):
+        account["google_client_secret"] = os.getenv("GOOGLE_CLIENT_SECRET")
+    if os.getenv("GOOGLE_CLIENT_SECRETS_FILE"):
+        account["google_client_secrets_file"] = os.getenv("GOOGLE_CLIENT_SECRETS_FILE")
+    if os.getenv("GOOGLE_TOKEN_PATH"):
+        account["google_token_path"] = os.getenv("GOOGLE_TOKEN_PATH")
+
+    return [account]
+
+
+def _create_client(account: dict[str, Any]) -> CalDAVClient:
+    """Create a CalDAVClient from an account config dict."""
+    url = account["url"]
+    auth_type = account.get("auth_type", "basic")
+    name = account.get("name", "default")
+
+    if auth_type == "oauth":
+        from .google_oauth import get_google_access_token
+
+        # Default token path per account
+        default_token = os.path.join(
+            os.path.expanduser("~"), ".config", "mcp-caldav", f"{name}_token.json"
+        )
+        token_path = account.get("google_token_path", default_token)
+
+        access_token = get_google_access_token(
+            client_id=account.get("google_client_id"),
+            client_secret=account.get("google_client_secret"),
+            client_secrets_file=account.get("google_client_secrets_file"),
+            token_path=token_path,
+        )
+        return CalDAVClient(url=url, password=access_token, auth_type="bearer")
+    else:
+        username = account.get("username", "")
+        password = account.get("password", "")
+        return CalDAVClient(url=url, username=username, password=password)
 
 
 @asynccontextmanager
 async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:  # noqa: ARG001
     """Initialize and clean up application resources."""
-    config = get_caldav_config()
+    accounts = _load_accounts_config()
+    clients: dict[str, CalDAVClient] = {}
+
+    for account in accounts:
+        name = account.get("name", "default")
+        try:
+            client = _create_client(account)
+            client.connect()
+            clients[name] = client
+            logger.info(f"Connected account '{name}': {account['url']}")
+        except Exception as e:
+            logger.error(f"Failed to connect account '{name}': {e}")
+
+    if not clients and not accounts:
+        logger.warning(
+            "No CalDAV accounts configured. "
+            "Create ~/.config/mcp-caldav/accounts.json or set CALDAV_URL env var."
+        )
 
     try:
-        client = None
-        if config["url"] and config["username"] and config["password"]:
-            client = CalDAVClient(
-                url=config["url"],
-                username=config["username"],
-                password=config["password"],
-            )
-            client.connect()
-            logger.info(
-                f"Connected to CalDAV server: {config['url']} "
-                f"for user: {config['username']}"
-            )
-        else:
-            missing = []
-            if not config["url"]:
-                missing.append("CALDAV_URL")
-            if not config["username"]:
-                missing.append("CALDAV_USERNAME")
-            if not config["password"]:
-                missing.append("CALDAV_PASSWORD")
-            logger.warning(
-                f"CalDAV not configured. Missing: {', '.join(missing)}. "
-                "Set these environment variables to enable calendar functionality."
-            )
-
-        yield AppContext(client=client)
+        yield AppContext(clients=clients)
     finally:
-        # Cleanup if needed
         pass
 
 
@@ -77,29 +126,54 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:  # noqa:
 app = Server("mcp-caldav", lifespan=server_lifespan)
 
 
+def _account_param(ctx: AppContext) -> dict[str, Any]:
+    """Build account parameter schema with connected account names."""
+    names = list(ctx.clients.keys())
+    return {
+        "type": "string",
+        "description": f"Account name. Connected accounts: {names}. Omit to use '{names[0]}'.",
+        "enum": names,
+    }
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available CalDAV tools."""
     ctx = app.request_context.lifespan_context
 
-    if not ctx or not ctx.client:
+    if not ctx or not ctx.clients:
         return []
+
+    acct_param = _account_param(ctx)
+    acct_names = list(ctx.clients.keys())
+    acct_desc = ", ".join(acct_names)
 
     tools = [
         Tool(
-            name="caldav_list_calendars",
-            description="List all available calendars",
+            name="caldav_list_accounts",
+            description=f"List all connected CalDAV accounts and their calendars. Connected: {acct_desc}",
             inputSchema={
                 "type": "object",
                 "properties": {},
             },
         ),
         Tool(
-            name="caldav_create_event",
-            description="Create a new event in the calendar",
+            name="caldav_list_calendars",
+            description=f"List calendars for a CalDAV account. Connected accounts: {acct_desc}",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
+                },
+            },
+        ),
+        Tool(
+            name="caldav_create_event",
+            description=f"Create a new calendar event. Specify account ({acct_desc}) and calendar_index.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": acct_param,
                     "calendar_index": {
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
@@ -231,10 +305,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_event_by_uid",
-            description="Get a specific event by its UID",
+            description=f"Get a specific event by its UID from an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "uid": {
                         "type": "string",
                         "description": "Event UID",
@@ -250,10 +325,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_delete_event",
-            description="Delete an event by its UID",
+            description=f"Delete an event by its UID from an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "uid": {
                         "type": "string",
                         "description": "Event UID to delete",
@@ -269,10 +345,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_search_events",
-            description="Search events by text, attendees, or location",
+            description=f"Search events by text, attendees, or location across an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "calendar_index": {
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
@@ -304,10 +381,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_events",
-            description="Get events from calendar for a specified period",
+            description=f"Get events for a date range from an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "calendar_index": {
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
@@ -333,10 +411,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_today_events",
-            description="Get all events for today",
+            description=f"Get today's events from an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "calendar_index": {
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
@@ -347,10 +426,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_week_events",
-            description="Get all events for the week",
+            description=f"Get this week's events from an account ({acct_desc})",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "account": acct_param,
                     "calendar_index": {
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
@@ -369,39 +449,59 @@ async def list_tools() -> list[Tool]:
     return tools
 
 
+def _get_client(ctx: AppContext, account: str | None) -> CalDAVClient:
+    """Resolve a client by account name, defaulting to the first one."""
+    if not ctx.clients:
+        raise RuntimeError("No CalDAV accounts connected.")
+
+    if account:
+        if account not in ctx.clients:
+            available = ", ".join(ctx.clients.keys())
+            raise ValueError(f"Account '{account}' not found. Available: {available}")
+        return ctx.clients[account]
+
+    # Default to first account
+    return next(iter(ctx.clients.values()))
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """Handle tool calls for CalDAV operations."""
     ctx = app.request_context.lifespan_context
 
-    if not ctx or not ctx.client:
-        config = get_caldav_config()
-        missing = []
-        if not config.get("url"):
-            missing.append("CALDAV_URL")
-        if not config.get("username"):
-            missing.append("CALDAV_USERNAME")
-        if not config.get("password"):
-            missing.append("CALDAV_PASSWORD")
-
-        message = "CalDAV client not configured."
-        if missing:
-            message += f" Missing variables: {', '.join(missing)}."
-        else:
-            message += (
-                " Please configure CALDAV_URL, CALDAV_USERNAME, and CALDAV_PASSWORD."
-            )
-
+    if not ctx or not ctx.clients:
         return [
             TextContent(
                 type="text",
-                text=json.dumps({"error": message}, indent=2, ensure_ascii=False),
+                text=json.dumps(
+                    {"error": "No CalDAV accounts connected. Check server logs."},
+                    indent=2,
+                ),
             )
         ]
 
     try:
-        if name == "caldav_list_calendars":
-            calendars = ctx.client.list_calendars()
+        account = arguments.get("account") if arguments else None
+
+        if name == "caldav_list_accounts":
+            account_list = []
+            for acct_name, client in ctx.clients.items():
+                cals = client.list_calendars()
+                account_list.append({
+                    "name": acct_name,
+                    "url": client.url,
+                    "calendars": cals,
+                })
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(account_list, indent=2, ensure_ascii=False),
+                )
+            ]
+
+        elif name == "caldav_list_calendars":
+            client = _get_client(ctx, account)
+            calendars = client.list_calendars()
             return [
                 TextContent(
                     type="text",
@@ -410,6 +510,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_create_event":
+            client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
             title = arguments.get("title")
             description = arguments.get("description", "")
@@ -447,7 +548,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     with suppress(ValueError):
                         recurrence["until"] = datetime.fromisoformat(until_str).date()
 
-            result = ctx.client.create_event(
+            result = client.create_event(
                 calendar_index=calendar_index,
                 title=title,
                 description=description,
@@ -470,6 +571,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_get_events":
+            client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
             start_date_str = arguments.get("start_date")
             end_date_str = arguments.get("end_date")
@@ -484,7 +586,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             if end_date_str:
                 end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
 
-            events = ctx.client.get_events(
+            events = client.get_events(
                 calendar_index=calendar_index,
                 start_date=start_date,
                 end_date=end_date,
@@ -499,8 +601,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_get_today_events":
+            client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
-            events = ctx.client.get_today_events(calendar_index=calendar_index)
+            events = client.get_today_events(calendar_index=calendar_index)
 
             return [
                 TextContent(
@@ -510,9 +613,10 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_get_week_events":
+            client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
             start_from_today = arguments.get("start_from_today", True)
-            events = ctx.client.get_week_events(
+            events = client.get_week_events(
                 calendar_index=calendar_index, start_from_today=start_from_today
             )
 
@@ -524,10 +628,11 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_get_event_by_uid":
+            client = _get_client(ctx, account)
             uid = arguments.get("uid")
             calendar_index = arguments.get("calendar_index", 0)
 
-            event = ctx.client.get_event_by_uid(uid=uid, calendar_index=calendar_index)
+            event = client.get_event_by_uid(uid=uid, calendar_index=calendar_index)
 
             if event:
                 return [
@@ -547,10 +652,11 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 ]
 
         elif name == "caldav_delete_event":
+            client = _get_client(ctx, account)
             uid = arguments.get("uid")
             calendar_index = arguments.get("calendar_index", 0)
 
-            result = ctx.client.delete_event(uid=uid, calendar_index=calendar_index)
+            result = client.delete_event(uid=uid, calendar_index=calendar_index)
 
             return [
                 TextContent(
@@ -560,6 +666,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             ]
 
         elif name == "caldav_search_events":
+            client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
             query = arguments.get("query")
             search_fields = arguments.get("search_fields")
@@ -581,7 +688,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             if end_date_str:
                 end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
 
-            events = ctx.client.search_events(
+            events = client.search_events(
                 calendar_index=calendar_index,
                 query=query,
                 search_fields=search_fields,
