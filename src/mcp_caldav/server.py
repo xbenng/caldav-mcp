@@ -175,7 +175,11 @@ async def list_tools() -> list[Tool]:
     tools = [
         Tool(
             name="caldav_list_accounts",
-            description=f"List all connected CalDAV accounts and their calendars. Connected: {acct_desc}",
+            description=(
+                f"List all connected calendar accounts and the calendars available in each. "
+                f"Connected accounts: {acct_desc}. "
+                "Use this to get an overview of all accounts and their calendar names/indices."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -183,7 +187,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_list_calendars",
-            description=f"List calendars for a CalDAV account. Connected accounts: {acct_desc}",
+            description=(
+                f"List all calendars accessible to an account ({acct_desc}). "
+                "For Google OAuth accounts this uses the Google Calendar API and returns every calendar "
+                "visible in the Google Calendar sidebar — including the user's own calendars, "
+                "other people's calendars they have access to, shared team calendars, and subscribed calendars. "
+                "Use this to discover calendar names before calling other tools with calendar_name. "
+                "The returned 'name' and 'index' can be used to identify a specific calendar."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -193,7 +204,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_create_event",
-            description=f"Create a new calendar event. Specify account ({acct_desc}) and calendar_index.",
+            description=(
+                f"Create a new calendar event in an account ({acct_desc}). "
+                "Specify the target calendar via calendar_name (e.g. 'work', 'personal', a coworker's name) "
+                "or calendar_index. Supports title, description, location, start/end times, duration, "
+                "attendees, reminders, categories, priority, and recurrence rules."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -333,7 +349,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_event_by_uid",
-            description=f"Get a specific event by its UID from an account ({acct_desc})",
+            description=(
+                f"Fetch the full details of a single event by its UID from an account ({acct_desc}). "
+                "The UID is returned in the 'uid' field of events from caldav_get_events, "
+                "caldav_get_today_events, caldav_get_week_events, or caldav_search_events. "
+                "Use this to retrieve complete event details including description and attendees."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -357,7 +378,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_delete_event",
-            description=f"Delete an event by its UID from an account ({acct_desc})",
+            description=(
+                f"Permanently delete a calendar event by its UID from an account ({acct_desc}). "
+                "The UID is returned in the 'uid' field of events from other get/search tools. "
+                "This action is irreversible — confirm with the user before calling."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -381,7 +406,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_search_events",
-            description=f"Search events by text, attendees, or location across an account ({acct_desc})",
+            description=(
+                f"Search for events in a calendar by keyword, attendee email, or location ({acct_desc}). "
+                "Requires a date range (start_date and end_date). For Google accounts, title and description "
+                "searches run server-side for speed; location and attendee searches filter client-side. "
+                "Use search_fields to narrow which fields are searched. "
+                "Useful for finding events involving a specific person or topic within a time window."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -421,7 +452,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_events",
-            description=f"Get events for a date range from an account ({acct_desc})",
+            description=(
+                f"Get all events in a specific calendar for a given date range ({acct_desc}). "
+                "Defaults to today through 7 days out if no dates provided. "
+                "Specify calendar_name (e.g. 'erik', 'deepthi', 'work') to query a specific person's "
+                "or team's calendar. Use caldav_list_calendars to see all available calendar names. "
+                "For checking someone's schedule or availability, prefer caldav_get_today_events or "
+                "caldav_get_week_events for convenience."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -455,7 +493,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_today_events",
-            description=f"Get today's events from an account ({acct_desc})",
+            description=(
+                f"Get all events scheduled for today from a calendar ({acct_desc}). "
+                "Use calendar_name to check a specific person's or team's calendar "
+                "(e.g. 'erik', 'deepthi', 'Stafl Systems Master Calendar'). "
+                "Omit calendar_name to get the account owner's primary calendar."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -474,7 +517,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="caldav_get_week_events",
-            description=f"Get this week's events from an account ({acct_desc})",
+            description=(
+                f"Get all events for the next 7 days (or current Mon–Sun week) from a calendar ({acct_desc}). "
+                "Use start_from_today=true (default) to get a rolling 7-day window from today, "
+                "or start_from_today=false to get the current calendar week (Monday through Sunday). "
+                "Use calendar_name to check a specific person's or team's calendar."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
