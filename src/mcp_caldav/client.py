@@ -315,6 +315,7 @@ class CalDAVClient:
         # Full calendar list from Google Calendar REST API (includes subscribed/shared calendars).
         # When set, list_calendars() and _resolve_calendar() use this instead of principal.calendars().
         self._google_calendars: list[dict] | None = None
+        self._google_api: Any | None = None  # GoogleCalendarAPI instance, set via set_google_calendars
         # Detect Yandex Calendar for special handling
         self.is_yandex = "yandex.ru" in url.lower() or "yandex.com" in url.lower()
 
@@ -340,13 +341,16 @@ class CalDAVClient:
             raise ConnectionError(f"Failed to connect to CalDAV server: {e}") from e
 
     def set_google_calendars(self, calendars: list[dict]) -> None:
-        """Provide the full Google calendar list fetched via the Calendar REST API.
+        """Provide the full Google calendar list and enable the Google Calendar REST API backend.
 
-        When set, list_calendars() and _resolve_calendar() use this list instead of
-        principal.calendars(), enabling access to subscribed and shared calendars that
-        Google's CalDAV principal endpoint does not expose.
+        When set, all event operations (get, create, delete, search) use the Google
+        Calendar REST API instead of CalDAV, enabling access to subscribed and shared
+        calendars that Google's CalDAV endpoint cannot reach.
         """
+        from .google_oauth import GoogleCalendarAPI
+
         self._google_calendars = calendars
+        self._google_api = GoogleCalendarAPI(self.password)
 
     def _check_connected(self) -> None:
         """Raise if not connected."""
@@ -357,6 +361,26 @@ class CalDAVClient:
         """Return all calendars accessible to the authenticated user."""
         self._check_connected()
         return self.principal.calendars()  # type: ignore[union-attr]
+
+    def _resolve_google_id(
+        self, calendar_index: int = 0, calendar_name: str | None = None
+    ) -> str:
+        """Return the Google Calendar ID for the specified calendar (Google accounts only)."""
+        cals = self._google_calendars  # type: ignore[union-attr]
+        if calendar_name is not None:
+            needle = calendar_name.lower()
+            for cal in cals:
+                if needle in cal["name"].lower() or needle in cal["id"].lower():
+                    return cal["id"]  # type: ignore[no-any-return]
+            available = [c["name"] for c in cals]
+            raise ValueError(
+                f"Calendar '{calendar_name}' not found. Available calendars: {available}"
+            )
+        if calendar_index >= len(cals):
+            raise ValueError(
+                f"Calendar index {calendar_index} not found. Available calendars: {len(cals)}"
+            )
+        return cals[calendar_index]["id"]  # type: ignore[no-any-return]
 
     def _resolve_calendar(
         self, calendar_index: int = 0, calendar_name: str | None = None
@@ -486,6 +510,20 @@ class CalDAVClient:
         """
         self._check_connected()
 
+        if self._google_api is not None:
+            cal_id = self._resolve_google_id(calendar_index, calendar_name)
+            return self._google_api.create_event(
+                calendar_id=cal_id,
+                title=title,
+                description=description,
+                location=location,
+                start_time=start_time,
+                end_time=end_time,
+                duration_hours=duration_hours,
+                attendees=attendees,  # type: ignore[arg-type]
+                recurrence=recurrence,
+            )
+
         try:
             calendar = self._resolve_calendar(calendar_index, calendar_name)
 
@@ -609,6 +647,10 @@ END:VCALENDAR"""
             List of event dictionaries
         """
         self._check_connected()
+
+        if self._google_api is not None:
+            cal_id = self._resolve_google_id(calendar_index, calendar_name)
+            return self._google_api.get_events(cal_id, start_date, end_date, include_all_day)
 
         try:
             calendar = self._resolve_calendar(calendar_index, calendar_name)
@@ -750,6 +792,10 @@ END:VCALENDAR"""
         """
         self._check_connected()
 
+        if self._google_api is not None:
+            cal_id = self._resolve_google_id(calendar_index, calendar_name)
+            return self._google_api.get_event_by_uid(cal_id, uid)
+
         try:
             calendar = self._resolve_calendar(calendar_index, calendar_name)
 
@@ -846,6 +892,13 @@ END:VCALENDAR"""
         """
         self._check_connected()
 
+        if self._google_api is not None:
+            cal_id = self._resolve_google_id(calendar_index, calendar_name)
+            success = self._google_api.delete_event(cal_id, uid)
+            if success:
+                return {"success": True, "uid": uid, "message": "Event deleted successfully"}
+            raise ValueError(f"Event with UID {uid} not found")
+
         try:
             calendar = self._resolve_calendar(calendar_index, calendar_name)
 
@@ -897,6 +950,10 @@ END:VCALENDAR"""
             List of matching event dictionaries
         """
         self._check_connected()
+
+        if self._google_api is not None:
+            cal_id = self._resolve_google_id(calendar_index, calendar_name)
+            return self._google_api.search_events(cal_id, query, search_fields, start_date, end_date)
 
         if start_date is None or end_date is None:
             raise ValueError(
