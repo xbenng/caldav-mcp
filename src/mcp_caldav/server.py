@@ -66,6 +66,17 @@ def _load_accounts_config() -> list[dict[str, Any]]:
     return [account]
 
 
+def _extract_google_email(url: str) -> str | None:
+    """Extract the user email from a Google CalDAV URL."""
+    import re
+    from urllib.parse import unquote
+
+    match = re.search(r"/caldav/v2/([^/]+)", url)
+    if match:
+        return unquote(match.group(1))
+    return None
+
+
 def _create_client(account: dict[str, Any]) -> CalDAVClient:
     """Create a CalDAVClient from an account config dict."""
     url = account["url"]
@@ -73,7 +84,7 @@ def _create_client(account: dict[str, Any]) -> CalDAVClient:
     name = account.get("name", "default")
 
     if auth_type == "oauth":
-        from .google_oauth import get_google_access_token
+        from .google_oauth import fetch_google_calendar_list, get_google_access_token
 
         # Default token path per account
         default_token = os.path.join(
@@ -87,7 +98,20 @@ def _create_client(account: dict[str, Any]) -> CalDAVClient:
             client_secrets_file=account.get("google_client_secrets_file"),
             token_path=token_path,
         )
-        return CalDAVClient(url=url, password=access_token, auth_type="bearer")
+        client = CalDAVClient(url=url, password=access_token, auth_type="bearer")
+
+        # Populate the full calendar list via Google Calendar REST API so that
+        # subscribed and shared calendars are visible alongside owned calendars.
+        user_email = _extract_google_email(url)
+        if user_email:
+            try:
+                calendars = fetch_google_calendar_list(access_token, user_email)
+                client.set_google_calendars(calendars)
+                logger.debug(f"Loaded {len(calendars)} Google calendars for {user_email}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch Google calendar list for {user_email}: {e}")
+
+        return client
     else:
         username = account.get("username", "")
         password = account.get("password", "")

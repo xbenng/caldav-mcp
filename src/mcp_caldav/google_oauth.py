@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -105,3 +107,52 @@ def get_google_access_token(
     creds = flow.run_local_server(port=0, open_browser=True)
     _save_token(creds, token_path)
     return creds.token
+
+
+def fetch_google_calendar_list(access_token: str, user_email: str) -> list[dict[str, Any]]:
+    """Fetch all calendars via the Google Calendar REST API.
+
+    This returns the complete list of calendars visible to the user — including
+    subscribed calendars, shared calendars from other people, and team calendars —
+    which Google's CalDAV principal endpoint does not expose.
+
+    Args:
+        access_token: A valid Google OAuth access token.
+        user_email: The authenticated user's email address (used to construct CalDAV URLs).
+
+    Returns:
+        List of calendar dicts with keys: id, name, caldav_url, access_role, primary.
+    """
+    encoded_email = urllib.parse.quote(user_email, safe="")
+    base_caldav = f"https://apidata.googleusercontent.com/caldav/v2/{encoded_email}"
+
+    url = "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode())
+
+    calendars = []
+    for item in data.get("items", []):
+        cal_id: str = item["id"]
+        name: str = item.get("summary", cal_id)
+        primary: bool = item.get("primary", False)
+        access_role: str = item.get("accessRole", "")
+
+        if primary:
+            caldav_url = f"{base_caldav}/events/"
+        else:
+            caldav_url = f"{base_caldav}/{urllib.parse.quote(cal_id, safe='')}/"
+
+        calendars.append(
+            {
+                "id": cal_id,
+                "name": name,
+                "caldav_url": caldav_url,
+                "access_role": access_role,
+                "primary": primary,
+            }
+        )
+
+    logger.debug(f"Fetched {len(calendars)} calendars for {user_email}")
+    return calendars

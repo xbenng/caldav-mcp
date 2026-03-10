@@ -312,6 +312,9 @@ class CalDAVClient:
         self.auth_type = auth_type
         self.client: Any | None = None
         self.principal: Any | None = None
+        # Full calendar list from Google Calendar REST API (includes subscribed/shared calendars).
+        # When set, list_calendars() and _resolve_calendar() use this instead of principal.calendars().
+        self._google_calendars: list[dict] | None = None
         # Detect Yandex Calendar for special handling
         self.is_yandex = "yandex.ru" in url.lower() or "yandex.com" in url.lower()
 
@@ -336,6 +339,15 @@ class CalDAVClient:
         except Exception as e:
             raise ConnectionError(f"Failed to connect to CalDAV server: {e}") from e
 
+    def set_google_calendars(self, calendars: list[dict]) -> None:
+        """Provide the full Google calendar list fetched via the Calendar REST API.
+
+        When set, list_calendars() and _resolve_calendar() use this list instead of
+        principal.calendars(), enabling access to subscribed and shared calendars that
+        Google's CalDAV principal endpoint does not expose.
+        """
+        self._google_calendars = calendars
+
     def _check_connected(self) -> None:
         """Raise if not connected."""
         if not self.principal:
@@ -351,14 +363,37 @@ class CalDAVClient:
     ) -> Any:
         """Return the calendar matching name (if given) or index.
 
+        If a Google calendar list has been set via set_google_calendars(), uses that
+        (enables subscribed/shared calendar access). Otherwise falls back to
+        principal.calendars().
+
         calendar_name takes precedence over calendar_index. Matching is
-        case-insensitive and also checks the calendar URL for partial matches,
-        so you can pass an email address or a fragment of the calendar name.
+        case-insensitive and checks both the calendar name and ID/URL, so you can
+        pass a partial name or email fragment.
 
         Raises ValueError if the calendar cannot be found.
         """
-        calendars = self._get_calendars()
+        if self._google_calendars is not None:
+            cals = self._google_calendars
+            if calendar_name is not None:
+                needle = calendar_name.lower()
+                for cal in cals:
+                    if needle in cal["name"].lower() or needle in cal["id"].lower():
+                        return self.client.calendar(url=cal["caldav_url"])  # type: ignore[union-attr]
+                available = [c["name"] for c in cals]
+                raise ValueError(
+                    f"Calendar '{calendar_name}' not found. "
+                    f"Available calendars: {available}"
+                )
+            if calendar_index >= len(cals):
+                raise ValueError(
+                    f"Calendar index {calendar_index} not found. "
+                    f"Available calendars: {len(cals)}"
+                )
+            return self.client.calendar(url=cals[calendar_index]["caldav_url"])  # type: ignore[union-attr]
 
+        # Fallback: CalDAV principal discovery
+        calendars = self._get_calendars()
         if calendar_name is not None:
             needle = calendar_name.lower()
             for cal in calendars:
@@ -373,7 +408,6 @@ class CalDAVClient:
                 f"Calendar '{calendar_name}' not found. "
                 f"Available calendars: {available}"
             )
-
         if calendar_index >= len(calendars):
             raise ValueError(
                 f"Calendar index {calendar_index} not found. "
@@ -382,10 +416,15 @@ class CalDAVClient:
         return calendars[calendar_index]
 
     def list_calendars(self) -> list[CalendarInfo]:
-        """Get list of all accessible calendars, including shared/delegated ones."""
+        """Get list of all accessible calendars, including shared/subscribed ones."""
         self._check_connected()
 
         try:
+            if self._google_calendars is not None:
+                return [
+                    CalendarInfo(index=i, name=c["name"], url=c["caldav_url"])
+                    for i, c in enumerate(self._google_calendars)
+                ]
             calendars = self._get_calendars()
             result = []
             for i, cal in enumerate(calendars):
