@@ -21,8 +21,8 @@ logger = logging.getLogger("mcp-caldav")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-DEFAULT_CLIENT_ID = "841100830294-opplvurbhn457ll94uo8i6oogb9lagce.apps.googleusercontent.com"
-DEFAULT_CLIENT_SECRET = "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"
+DEFAULT_CLIENT_ID: str | None = None
+DEFAULT_CLIENT_SECRET: str | None = None
 
 DEFAULT_TOKEN_PATH = os.path.join(
     os.path.expanduser("~"), ".config", "mcp-caldav", "google_token.json"
@@ -105,9 +105,14 @@ def get_google_access_token(
 
     if client_secrets_file and os.path.exists(client_secrets_file):
         flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, SCOPES)
-    else:
+    elif client_id and client_secret:
         client_config = _build_client_config(client_id, client_secret)
         flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+    else:
+        raise ValueError(
+            "Google OAuth credentials required. Provide client_id + client_secret, "
+            "or client_secrets_file, or set google_client_id/google_client_secret in accounts.json."
+        )
 
     creds = flow.run_local_server(port=0, open_browser=True)
     _save_token(creds, token_path)

@@ -206,7 +206,7 @@ async def list_tools() -> list[Tool]:
             name="caldav_create_event",
             description=(
                 f"Create a new calendar event in an account ({acct_desc}). "
-                "Specify the target calendar via calendar_name (e.g. 'work', 'personal', a coworker's name) "
+                "Specify the target calendar via calendar_name (e.g. 'work', 'personal', or a coworker's name) "
                 "or calendar_index. Supports title, description, location, start/end times, duration, "
                 "attendees, reminders, categories, priority, and recurrence rules."
             ),
@@ -455,8 +455,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 f"Get all events in a specific calendar for a given date range ({acct_desc}). "
                 "Defaults to today through 7 days out if no dates provided. "
-                "Specify calendar_name (e.g. 'erik', 'deepthi', 'work') to query a specific person's "
-                "or team's calendar. Use caldav_list_calendars to see all available calendar names. "
+                "Specify calendar_name to query a specific person's or team's calendar. "
+                "Use caldav_list_calendars to see all available calendar names. "
                 "For checking someone's schedule or availability, prefer caldav_get_today_events or "
                 "caldav_get_week_events for convenience."
             ),
@@ -495,8 +495,7 @@ async def list_tools() -> list[Tool]:
             name="caldav_get_today_events",
             description=(
                 f"Get all events scheduled for today from a calendar ({acct_desc}). "
-                "Use calendar_name to check a specific person's or team's calendar "
-                "(e.g. 'erik', 'deepthi', 'Stafl Systems Master Calendar'). "
+                "Use calendar_name to check a specific person's or team's calendar. "
                 "Omit calendar_name to get the account owner's primary calendar."
             ),
             inputSchema={
