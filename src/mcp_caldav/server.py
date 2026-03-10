@@ -66,26 +66,9 @@ def _load_accounts_config() -> list[dict[str, Any]]:
     return [account]
 
 
-def _google_caldav_url(email: str) -> str:
-    """Build the Google CalDAV URL for a given email address."""
-    return f"https://apidata.googleusercontent.com/caldav/v2/{email}/events/"
-
-
-def _create_client(
-    account: dict[str, Any],
-    url_override: str | None = None,
-    use_direct_url: bool = False,
-) -> CalDAVClient:
-    """Create a CalDAVClient from an account config dict.
-
-    Args:
-        account: Account config dictionary.
-        url_override: Use this URL instead of account["url"]. Used for delegated access.
-        use_direct_url: Open the URL as a calendar directly, skipping principal discovery.
-            Required for delegated/shared calendars where the delegatee's principal would
-            only return their own calendars.
-    """
-    url = url_override or account["url"]
+def _create_client(account: dict[str, Any]) -> CalDAVClient:
+    """Create a CalDAVClient from an account config dict."""
+    url = account["url"]
     auth_type = account.get("auth_type", "basic")
     name = account.get("name", "default")
 
@@ -104,15 +87,11 @@ def _create_client(
             client_secrets_file=account.get("google_client_secrets_file"),
             token_path=token_path,
         )
-        return CalDAVClient(
-            url=url, password=access_token, auth_type="bearer", use_direct_url=use_direct_url
-        )
+        return CalDAVClient(url=url, password=access_token, auth_type="bearer")
     else:
         username = account.get("username", "")
         password = account.get("password", "")
-        return CalDAVClient(
-            url=url, username=username, password=password, use_direct_url=use_direct_url
-        )
+        return CalDAVClient(url=url, username=username, password=password)
 
 
 @asynccontextmanager
@@ -130,32 +109,6 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:  # noqa:
             logger.info(f"Connected account '{name}': {account['url']}")
         except Exception as e:
             logger.error(f"Failed to connect account '{name}': {e}")
-            continue
-
-        # Load delegated accounts that share this account's credentials.
-        # Each entry specifies a calendar that the authenticated user has been granted
-        # access to (e.g. via Google Calendar sharing or Workspace delegation).
-        for delegated in account.get("delegated_accounts", []):
-            del_name = delegated.get("name")
-            del_email = delegated.get("email")
-            del_url = delegated.get("url") or (
-                _google_caldav_url(del_email) if del_email else None
-            )
-
-            if not del_name or not del_url:
-                logger.warning(
-                    f"Skipping delegated account under '{name}': "
-                    "must have 'name' and either 'email' or 'url'"
-                )
-                continue
-
-            try:
-                del_client = _create_client(account, url_override=del_url, use_direct_url=True)
-                del_client.connect()
-                clients[del_name] = del_client
-                logger.info(f"Connected delegated account '{del_name}': {del_url}")
-            except Exception as e:
-                logger.error(f"Failed to connect delegated account '{del_name}': {e}")
 
     if not clients and not accounts:
         logger.warning(
@@ -225,6 +178,10 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
+                    },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
                     },
                     "title": {
                         "type": "string",
@@ -366,6 +323,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
                     },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
+                    },
                 },
                 "required": ["uid"],
             },
@@ -386,6 +347,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
                     },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
+                    },
                 },
                 "required": ["uid"],
             },
@@ -401,6 +366,10 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
+                    },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
                     },
                     "query": {
                         "type": "string",
@@ -438,6 +407,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
                     },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
+                    },
                     "start_date": {
                         "type": "string",
                         "description": "Start date in ISO format (e.g., '2025-01-20T00:00:00'). "
@@ -468,6 +441,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
                     },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
+                    },
                 },
             },
         ),
@@ -482,6 +459,10 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Index of the calendar (default: 0)",
                         "default": 0,
+                    },
+                    "calendar_name": {
+                        "type": "string",
+                        "description": "Calendar name (or partial name/email). Takes precedence over calendar_index. Use caldav_list_calendars to see available calendars.",
                     },
                     "start_from_today": {
                         "type": "boolean",
@@ -559,6 +540,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "caldav_create_event":
             client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
             title = arguments.get("title")
             description = arguments.get("description", "")
             location = arguments.get("location", "")
@@ -597,6 +579,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
             result = client.create_event(
                 calendar_index=calendar_index,
+                calendar_name=calendar_name,
                 title=title,
                 description=description,
                 location=location,
@@ -620,6 +603,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "caldav_get_events":
             client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
             start_date_str = arguments.get("start_date")
             end_date_str = arguments.get("end_date")
             include_all_day = arguments.get("include_all_day", True)
@@ -635,6 +619,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
             events = client.get_events(
                 calendar_index=calendar_index,
+                calendar_name=calendar_name,
                 start_date=start_date,
                 end_date=end_date,
                 include_all_day=include_all_day,
@@ -650,7 +635,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "caldav_get_today_events":
             client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
-            events = client.get_today_events(calendar_index=calendar_index)
+            calendar_name = arguments.get("calendar_name")
+            events = client.get_today_events(calendar_index=calendar_index, calendar_name=calendar_name)
 
             return [
                 TextContent(
@@ -662,9 +648,10 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "caldav_get_week_events":
             client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
             start_from_today = arguments.get("start_from_today", True)
             events = client.get_week_events(
-                calendar_index=calendar_index, start_from_today=start_from_today
+                calendar_index=calendar_index, calendar_name=calendar_name, start_from_today=start_from_today
             )
 
             return [
@@ -678,8 +665,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             client = _get_client(ctx, account)
             uid = arguments.get("uid")
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
 
-            event = client.get_event_by_uid(uid=uid, calendar_index=calendar_index)
+            event = client.get_event_by_uid(uid=uid, calendar_index=calendar_index, calendar_name=calendar_name)
 
             if event:
                 return [
@@ -702,8 +690,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             client = _get_client(ctx, account)
             uid = arguments.get("uid")
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
 
-            result = client.delete_event(uid=uid, calendar_index=calendar_index)
+            result = client.delete_event(uid=uid, calendar_index=calendar_index, calendar_name=calendar_name)
 
             return [
                 TextContent(
@@ -715,6 +704,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         elif name == "caldav_search_events":
             client = _get_client(ctx, account)
             calendar_index = arguments.get("calendar_index", 0)
+            calendar_name = arguments.get("calendar_name")
             query = arguments.get("query")
             search_fields = arguments.get("search_fields")
             start_date_str = arguments.get("start_date")
@@ -737,6 +727,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
             events = client.search_events(
                 calendar_index=calendar_index,
+                calendar_name=calendar_name,
                 query=query,
                 search_fields=search_fields,
                 start_date=start_date,

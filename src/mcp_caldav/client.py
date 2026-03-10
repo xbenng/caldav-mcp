@@ -296,7 +296,6 @@ class CalDAVClient:
         username: str = "",
         password: str = "",
         auth_type: str = "basic",
-        use_direct_url: bool = False,
     ):
         """
         Initialize CalDAV client.
@@ -306,19 +305,13 @@ class CalDAVClient:
             username: Username for authentication (basic auth)
             password: Password, app password, or OAuth access token
             auth_type: "basic" for username/password, "bearer" for OAuth token
-            use_direct_url: If True, open the URL as a calendar directly instead of
-                discovering calendars via principal. Used for delegated/shared access
-                where the calendar URL is known but principal lookup would only return
-                the authenticating user's own calendars.
         """
         self.url = url
         self.username = username
         self.password = password
         self.auth_type = auth_type
-        self.use_direct_url = use_direct_url
         self.client: Any | None = None
         self.principal: Any | None = None
-        self._direct_calendar: Any | None = None
         # Detect Yandex Calendar for special handling
         self.is_yandex = "yandex.ru" in url.lower() or "yandex.com" in url.lower()
 
@@ -338,33 +331,58 @@ class CalDAVClient:
                     username=self.username,
                     password=self.password,
                 )
-
-            if self.use_direct_url:
-                self._direct_calendar = self.client.calendar(url=self.url)
-            else:
-                self.principal = self.client.principal()
+            self.principal = self.client.principal()
             return True
         except Exception as e:
             raise ConnectionError(f"Failed to connect to CalDAV server: {e}") from e
 
     def _check_connected(self) -> None:
         """Raise if not connected."""
-        if self.use_direct_url:
-            if not self._direct_calendar:
-                raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
-        else:
-            if not self.principal:
-                raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
+        if not self.principal:
+            raise RuntimeError("Not connected to CalDAV server. Call connect() first.")
 
     def _get_calendars(self) -> list[Any]:
-        """Return the list of accessible calendars."""
+        """Return all calendars accessible to the authenticated user."""
         self._check_connected()
-        if self.use_direct_url:
-            return [self._direct_calendar]
         return self.principal.calendars()  # type: ignore[union-attr]
 
+    def _resolve_calendar(
+        self, calendar_index: int = 0, calendar_name: str | None = None
+    ) -> Any:
+        """Return the calendar matching name (if given) or index.
+
+        calendar_name takes precedence over calendar_index. Matching is
+        case-insensitive and also checks the calendar URL for partial matches,
+        so you can pass an email address or a fragment of the calendar name.
+
+        Raises ValueError if the calendar cannot be found.
+        """
+        calendars = self._get_calendars()
+
+        if calendar_name is not None:
+            needle = calendar_name.lower()
+            for cal in calendars:
+                try:
+                    name = cal.name or ""
+                except Exception:
+                    name = ""
+                if needle in name.lower() or needle in str(cal.url).lower():
+                    return cal
+            available = [getattr(c, "name", str(c.url)) for c in calendars]
+            raise ValueError(
+                f"Calendar '{calendar_name}' not found. "
+                f"Available calendars: {available}"
+            )
+
+        if calendar_index >= len(calendars):
+            raise ValueError(
+                f"Calendar index {calendar_index} not found. "
+                f"Available calendars: {len(calendars)}"
+            )
+        return calendars[calendar_index]
+
     def list_calendars(self) -> list[CalendarInfo]:
-        """Get list of available calendars."""
+        """Get list of all accessible calendars, including shared/delegated ones."""
         self._check_connected()
 
         try:
@@ -383,6 +401,7 @@ class CalDAVClient:
     def create_event(
         self,
         calendar_index: int = 0,
+        calendar_name: str | None = None,
         title: str = "Event",
         description: str = "",
         location: str = "",
@@ -429,14 +448,7 @@ class CalDAVClient:
         self._check_connected()
 
         try:
-            calendars = self._get_calendars()
-            if calendar_index >= len(calendars):
-                raise ValueError(
-                    f"Calendar index {calendar_index} not found. "
-                    f"Available calendars: {len(calendars)}"
-                )
-
-            calendar = calendars[calendar_index]
+            calendar = self._resolve_calendar(calendar_index, calendar_name)
 
             # Set default times
             if start_time is None:
@@ -540,6 +552,7 @@ END:VCALENDAR"""
     def get_events(
         self,
         calendar_index: int = 0,
+        calendar_name: str | None = None,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         include_all_day: bool = True,
@@ -559,14 +572,7 @@ END:VCALENDAR"""
         self._check_connected()
 
         try:
-            calendars = self._get_calendars()
-            if calendar_index >= len(calendars):
-                raise ValueError(
-                    f"Calendar index {calendar_index} not found. "
-                    f"Available calendars: {len(calendars)}"
-                )
-
-            calendar = calendars[calendar_index]
+            calendar = self._resolve_calendar(calendar_index, calendar_name)
 
             # Set default dates
             if start_date is None:
@@ -666,14 +672,16 @@ END:VCALENDAR"""
         except Exception as e:
             raise RuntimeError(f"Failed to get events: {e}") from e
 
-    def get_today_events(self, calendar_index: int = 0) -> list[EventRecord]:
+    def get_today_events(
+        self, calendar_index: int = 0, calendar_name: str | None = None
+    ) -> list[EventRecord]:
         """Get all events for today."""
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start + timedelta(days=1)
-        return self.get_events(calendar_index, today_start, today_end)
+        return self.get_events(calendar_index=calendar_index, calendar_name=calendar_name, start_date=today_start, end_date=today_end)
 
     def get_week_events(
-        self, calendar_index: int = 0, start_from_today: bool = True
+        self, calendar_index: int = 0, calendar_name: str | None = None, start_from_today: bool = True
     ) -> list[EventRecord]:
         """Get all events for the week."""
         if start_from_today:
@@ -688,9 +696,9 @@ END:VCALENDAR"""
             )
 
         end_date = start_date + timedelta(days=7)
-        return self.get_events(calendar_index, start_date, end_date)
+        return self.get_events(calendar_index=calendar_index, calendar_name=calendar_name, start_date=start_date, end_date=end_date)
 
-    def get_event_by_uid(self, uid: str, calendar_index: int = 0) -> EventRecord | None:
+    def get_event_by_uid(self, uid: str, calendar_index: int = 0, calendar_name: str | None = None) -> EventRecord | None:
         """
         Get a specific event by its UID.
 
@@ -704,14 +712,7 @@ END:VCALENDAR"""
         self._check_connected()
 
         try:
-            calendars = self._get_calendars()
-            if calendar_index >= len(calendars):
-                raise ValueError(
-                    f"Calendar index {calendar_index} not found. "
-                    f"Available calendars: {len(calendars)}"
-                )
-
-            calendar = calendars[calendar_index]
+            calendar = self._resolve_calendar(calendar_index, calendar_name)
 
             # Search for event by UID
             # Try to search in a wide date range (last year to next year)
@@ -793,7 +794,7 @@ END:VCALENDAR"""
         except Exception as e:
             raise RuntimeError(f"Failed to get event by UID: {e}") from e
 
-    def delete_event(self, uid: str, calendar_index: int = 0) -> EventDeletionResult:
+    def delete_event(self, uid: str, calendar_index: int = 0, calendar_name: str | None = None) -> EventDeletionResult:
         """
         Delete an event by its UID.
 
@@ -807,14 +808,7 @@ END:VCALENDAR"""
         self._check_connected()
 
         try:
-            calendars = self._get_calendars()
-            if calendar_index >= len(calendars):
-                raise ValueError(
-                    f"Calendar index {calendar_index} not found. "
-                    f"Available calendars: {len(calendars)}"
-                )
-
-            calendar = calendars[calendar_index]
+            calendar = self._resolve_calendar(calendar_index, calendar_name)
 
             # Find the event
             start_date = datetime.now() - timedelta(days=365)
@@ -843,6 +837,7 @@ END:VCALENDAR"""
     def search_events(
         self,
         calendar_index: int = 0,
+        calendar_name: str | None = None,
         query: str | None = None,
         search_fields: list[str] | None = None,
         start_date: datetime | None = None,
