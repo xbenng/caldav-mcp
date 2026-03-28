@@ -340,17 +340,26 @@ class CalDAVClient:
         except Exception as e:
             raise ConnectionError(f"Failed to connect to CalDAV server: {e}") from e
 
-    def set_google_calendars(self, calendars: list[dict]) -> None:
+    def set_google_calendars(
+        self, calendars: list[dict], credentials: "Any | None" = None, token_path: str | None = None
+    ) -> None:
         """Provide the full Google calendar list and enable the Google Calendar REST API backend.
 
         When set, all event operations (get, create, delete, search) use the Google
         Calendar REST API instead of CalDAV, enabling access to subscribed and shared
         calendars that Google's CalDAV endpoint cannot reach.
+
+        Args:
+            calendars: List of calendar dicts from fetch_google_calendar_list.
+            credentials: google.oauth2.credentials.Credentials object for auto-refresh.
+            token_path: Path to save refreshed tokens.
         """
         from .google_oauth import GoogleCalendarAPI
 
         self._google_calendars = calendars
-        self._google_api = GoogleCalendarAPI(self.password)
+        self._google_api = GoogleCalendarAPI(
+            self.password, credentials=credentials, token_path=token_path
+        )
 
     def _check_connected(self) -> None:
         """Raise if not connected."""

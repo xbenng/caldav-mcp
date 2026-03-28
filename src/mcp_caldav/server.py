@@ -92,7 +92,7 @@ def _create_client(account: dict[str, Any]) -> CalDAVClient:
         )
         token_path = account.get("google_token_path", default_token)
 
-        access_token = get_google_access_token(
+        access_token, credentials = get_google_access_token(
             client_id=account.get("google_client_id"),
             client_secret=account.get("google_client_secret"),
             client_secrets_file=account.get("google_client_secrets_file"),
@@ -106,7 +106,7 @@ def _create_client(account: dict[str, Any]) -> CalDAVClient:
         if user_email:
             try:
                 calendars = fetch_google_calendar_list(access_token, user_email)
-                client.set_google_calendars(calendars)
+                client.set_google_calendars(calendars, credentials=credentials, token_path=token_path)
                 logger.debug(f"Loaded {len(calendars)} Google calendars for {user_email}")
             except Exception as e:
                 logger.warning(f"Failed to fetch Google calendar list for {user_email}: {e}")
@@ -190,7 +190,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 f"List all calendars accessible to an account ({acct_desc}). "
                 "For Google OAuth accounts this uses the Google Calendar API and returns every calendar "
-                "visible in the Google Calendar sidebar — including the user's own calendars, "
+                "visible in the Google Calendar sidebar - including the user's own calendars, "
                 "other people's calendars they have access to, shared team calendars, and subscribed calendars. "
                 "Use this to discover calendar names before calling other tools with calendar_name. "
                 "The returned 'name' and 'index' can be used to identify a specific calendar."
@@ -381,7 +381,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 f"Permanently delete a calendar event by its UID from an account ({acct_desc}). "
                 "The UID is returned in the 'uid' field of events from other get/search tools. "
-                "This action is irreversible — confirm with the user before calling."
+                "This action is irreversible - confirm with the user before calling."
             ),
             inputSchema={
                 "type": "object",

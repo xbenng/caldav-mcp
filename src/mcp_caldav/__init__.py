@@ -132,7 +132,7 @@ def auth(
         csecret = client_secret or os.getenv("GOOGLE_CLIENT_SECRET")
         csfile = client_secrets_file or os.getenv("GOOGLE_CLIENT_SECRETS_FILE")
         tpath = token_path or os.getenv("GOOGLE_TOKEN_PATH")
-        get_google_access_token(
+        _token, _creds = get_google_access_token(
             client_id=cid,
             client_secret=csecret,
             client_secrets_file=csfile,
@@ -153,7 +153,7 @@ def auth(
         csfile = client_secrets_file or acct.get("google_client_secrets_file")
 
         click.echo(f"Authenticating account '{name}'...")
-        get_google_access_token(
+        _token, _creds = get_google_access_token(
             client_id=cid,
             client_secret=csecret,
             client_secrets_file=csfile,

@@ -67,7 +67,7 @@ def get_google_access_token(
     client_secrets_file: str | None = None,
     token_path: str | None = None,
     force_new: bool = False,
-) -> str:
+) -> tuple[str, Credentials]:
     """
     Get a valid Google OAuth access token, refreshing or running the
     authorization flow as needed.
@@ -81,7 +81,7 @@ def get_google_access_token(
         token_path: Path to store/load the token (default: ~/.config/mcp-caldav/google_token.json)
 
     Returns:
-        A valid access token string
+        Tuple of (access_token_string, Credentials_object)
     """
     token_path = token_path or DEFAULT_TOKEN_PATH
 
@@ -89,13 +89,13 @@ def get_google_access_token(
         creds = _load_token(token_path)
 
         if creds and creds.valid:
-            return creds.token
+            return creds.token, creds
 
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
                 _save_token(creds, token_path)
-                return creds.token
+                return creds.token, creds
             except Exception as e:
                 logger.warning(f"Token refresh failed, re-authorizing: {e}")
 
@@ -111,14 +111,14 @@ def get_google_access_token(
 
     creds = flow.run_local_server(port=0, open_browser=True)
     _save_token(creds, token_path)
-    return creds.token
+    return creds.token, creds
 
 
 def fetch_google_calendar_list(access_token: str, user_email: str) -> list[dict[str, Any]]:
     """Fetch all calendars via the Google Calendar REST API.
 
-    This returns the complete list of calendars visible to the user — including
-    subscribed calendars, shared calendars from other people, and team calendars —
+    This returns the complete list of calendars visible to the user - including
+    subscribed calendars, shared calendars from other people, and team calendars -
     which Google's CalDAV principal endpoint does not expose.
 
     Args:
@@ -228,10 +228,26 @@ class GoogleCalendarAPI:
 
     BASE = "https://www.googleapis.com/calendar/v3"
 
-    def __init__(self, access_token: str) -> None:
+    def __init__(self, access_token: str, credentials: Credentials | None = None, token_path: str | None = None) -> None:
         self.access_token = access_token
+        self._credentials = credentials
+        self._token_path = token_path
+
+    def _ensure_valid_token(self) -> None:
+        """Refresh the access token if expired."""
+        if self._credentials is None:
+            return
+        if self._credentials.valid:
+            return
+        if self._credentials.expired and self._credentials.refresh_token:
+            self._credentials.refresh(Request())
+            self.access_token = self._credentials.token
+            if self._token_path:
+                _save_token(self._credentials, self._token_path)
+            logger.debug("Refreshed expired Google access token")
 
     def _headers(self) -> dict[str, str]:
+        self._ensure_valid_token()
         return {"Authorization": f"Bearer {self.access_token}"}
 
     def _get(self, url: str) -> dict[str, Any]:
@@ -336,12 +352,20 @@ class GoogleCalendarAPI:
         if end_time is None:
             end_time = start_time + timedelta(hours=duration_hours)
 
+        # Google Calendar API requires timezone info on dateTime values.
+        # If the datetime is naive, attach the local UTC offset.
+        def _ensure_offset(dt: datetime) -> str:
+            if dt.tzinfo is not None:
+                return dt.isoformat()
+            local_dt = dt.astimezone()
+            return local_dt.isoformat()
+
         body: dict[str, Any] = {
             "summary": title,
             "description": description,
             "location": location,
-            "start": {"dateTime": start_time.isoformat()},
-            "end": {"dateTime": end_time.isoformat()},
+            "start": {"dateTime": _ensure_offset(start_time)},
+            "end": {"dateTime": _ensure_offset(end_time)},
         }
 
         if attendees:
